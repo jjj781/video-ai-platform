@@ -1,0 +1,105 @@
+server:
+  port: 8080
+  servlet:
+    context-path: /api
+
+spring:
+  application:
+    name: video-ai-platform
+  datasource:
+    url: jdbc:mysql://localhost:3307/video_ai?useUnicode=true&characterEncoding=utf8&useSSL=false&serverTimezone=Asia/Shanghai&allowPublicKeyRetrieval=true
+    username: root
+    password: ${DB_PASSWORD:root123}
+    driver-class-name: com.mysql.cj.jdbc.Driver
+  data:
+    redis:
+      host: ${REDIS_HOST:localhost}
+      port: ${REDIS_PORT:6379}
+      database: 0
+      lettuce:
+        pool:
+          max-active: 20
+          max-idle: 10
+          min-idle: 5
+  # Redisson 自动配置 (redisson-spring-boot-starter 读取此路径)
+  redis:
+    redisson:
+      config: |
+        singleServerConfig:
+          address: "redis://${REDIS_HOST:localhost}:${REDIS_PORT:6379}"
+          database: 0
+
+# MyBatis-Plus
+mybatis-plus:
+  mapper-locations: classpath:mapper/*.xml
+  global-config:
+    db-config:
+      id-type: auto
+      logic-delete-field: deleted
+      logic-delete-value: 1
+      logic-not-delete-value: 0
+  configuration:
+    map-underscore-to-camel-case: true
+    log-impl: org.apache.ibatis.logging.stdout.StdOutImpl
+
+# RocketMQ
+rocketmq:
+  name-server: ${ROCKETMQ_NAMESRV:localhost:9876}
+  producer:
+    group: video-ai-producer-group
+    send-message-timeout: 10000
+    retry-times-when-send-failed: 2
+
+# MinIO (本地部署, 替代阿里云OSS)
+minio:
+  endpoint: ${MINIO_ENDPOINT:http://localhost:9000}
+  access-key: ${MINIO_ACCESS_KEY:minioadmin}
+  secret-key: ${MINIO_SECRET_KEY:minioadmin123}
+  bucket-name: ${MINIO_BUCKET:video-ai}
+  # 预签名URL过期时间(秒)
+  presigned-expiry: 3600
+
+# AI 大模型 (硅基流动)
+ai:
+  siliconflow:
+    api-url: ${AI_API_URL:https://api.siliconflow.cn/v1/chat/completions}
+    api-key: ${AI_API_KEY:sk-yodozzeanonhdpdyxirgrhyqiwtldryojxehqeuhyffdkvlb}
+    model: ${AI_MODEL:Qwen/Qwen2.5-72B-Instruct}
+    max-tokens: 4096
+    temperature: 0.7
+    # ASR 语音识别
+    asr-url: ${AI_ASR_URL:https://api.siliconflow.cn/v1/audio/transcriptions}
+    asr-model: ${AI_ASR_MODEL:FunAudioLLM/SenseVoiceSmall}
+    # 多模态视觉模型
+    vision-model: ${AI_VISION_MODEL:PaddlePaddle/PaddleOCR-VL-1.5}
+    vision-max-tokens: 2048
+    vision-temperature: 0.3
+    # FFmpeg
+    ffmpeg-path: ${FFMPEG_PATH:ffmpeg}
+    ffprobe-path: ${FFPROBE_PATH:ffprobe}
+    keyframe-count: 5
+    ffmpeg-timeout-seconds: 120
+
+# Sa-Token
+sa-token:
+  token-name: Authorization
+  timeout: 86400
+  is-concurrent: true
+  is-share: true
+  token-style: uuid
+  is-read-cookie: false
+  is-read-header: true
+  is-read-body: false
+
+# 视频上传配置
+upload:
+  chunk-size: 5242880          # 5MB 分片大小
+  max-file-size: 5368709120    # 5GB 最大文件
+  temp-dir: /tmp/video-upload
+  concurrent-threads: 3        # 分片并发上传线程数
+
+# 限流配置
+rate-limit:
+  default-qps: 100
+  upload-qps: 10
+  ai-qps: 5

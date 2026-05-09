@@ -1,0 +1,118 @@
+version: '3.8'
+
+services:
+  # ==================== MySQL ====================
+  mysql:
+    image: mysql:8.0
+    container_name: video-ai-mysql
+    restart: unless-stopped
+    ports:
+      - "3307:3306"
+    environment:
+      MYSQL_ROOT_PASSWORD: root123
+      MYSQL_DATABASE: video_ai
+      MYSQL_CHARACTER_SET_SERVER: utf8mb4
+      MYSQL_COLLATION_SERVER: utf8mb4_unicode_ci
+      TZ: Asia/Shanghai
+    volumes:
+      - mysql_data:/var/lib/mysql
+      - ./backend/src/main/resources/schema.sql:/docker-entrypoint-initdb.d/init.sql
+    command: --default-authentication-plugin=mysql_native_password
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-uroot", "-proot123"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ==================== Redis ====================
+  redis:
+    image: redis:7-alpine
+    container_name: video-ai-redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    command: redis-server --appendonly yes --maxmemory 256mb --maxmemory-policy allkeys-lru
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  # ==================== RocketMQ NameServer ====================
+  rocketmq-namesrv:
+    image: apache/rocketmq:5.1.4
+    container_name: video-ai-rocketmq-namesrv
+    restart: unless-stopped
+    ports:
+      - "9876:9876"
+    environment:
+      JAVA_OPT_EXT: "-server -Xms256m -Xmx256m"
+    command: sh mqnamesrv
+    healthcheck:
+      test: ["CMD", "nc", "-z", "localhost", "9876"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  # ==================== RocketMQ Broker ====================
+  rocketmq-broker:
+    image: apache/rocketmq:5.1.4
+    container_name: video-ai-rocketmq-broker
+    restart: unless-stopped
+    ports:
+      - "10911:10911"
+      - "10909:10909"
+    environment:
+      JAVA_OPT_EXT: "-server -Xms512m -Xmx512m"
+      NAMESRV_ADDR: "rocketmq-namesrv:9876"
+    command: sh mqbroker -n rocketmq-namesrv:9876 #--enable-controller
+    depends_on:
+      rocketmq-namesrv:
+        condition: service_started
+    healthcheck:
+      test: ["CMD", "nc", "-z", "localhost", "10911"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  # ==================== MinIO (替代阿里云OSS) ====================
+  minio:
+    image: minio/minio:latest
+    container_name: video-ai-minio
+    restart: unless-stopped
+    ports:
+      - "9000:9000"    # API端口
+      - "9001:9001"    # 管理控制台
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin123
+    volumes:
+      - minio_data:/data
+    command: server /data --console-address ":9001"
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # MinIO初始化 (创建bucket)
+  minio-init:
+    image: minio/mc:latest
+    container_name: video-ai-minio-init
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint: >
+      /bin/sh -c "
+      mc alias set myminio http://minio:9000 minioadmin minioadmin123;
+      mc mb --ignore-existing myminio/video-ai;
+      mc anonymous set download myminio/video-ai;
+      echo 'MinIO bucket 初始化完成';
+      "
+
+volumes:
+  mysql_data:
+  redis_data:
+  minio_data:
