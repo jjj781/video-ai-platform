@@ -34,7 +34,7 @@ public class UploadController {
      */
     @Operation(summary = "初始化分片上传")
     @PostMapping("/init")
-    @RateLimit(permitsPerMinute = 600, key = "upload-init")
+    @RateLimit(permitsPerMinute = 10, key = "upload-init")
     public Result<UploadInitVO> initUpload(@Valid @RequestBody UploadInitDTO dto) {
         return Result.ok(uploadService.initUpload(dto));
     }

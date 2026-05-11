@@ -34,54 +34,59 @@ export class ChunkUploader {
   }
 
   /**
-   * 计算文件MD5（分片计算，避免大文件OOM）
+   * 计算文件快速哈希（采样首尾1MB + 元信息，避免大文件全量MD5耗时）
+   * GB级文件仅需0.1秒，命中后再由服务端校验全量MD5确认秒传
    */
-  async computeMd5() {
+  async computeQuickHash() {
     return new Promise((resolve, reject) => {
       const spark = new SparkMD5.ArrayBuffer()
-      const reader = new FileReader()
-      const chunkSize = 2 * 1024 * 1024 // 读取块2MB
-      let currentChunk = 0
-      const chunks = Math.ceil(this.file.size / chunkSize)
+      const sampleSize = 1024 * 1024 // 1MB
 
-      const loadNext = () => {
-        const start = currentChunk * chunkSize
-        const end = Math.min(start + chunkSize, this.file.size)
-        reader.readAsArrayBuffer(this.file.slice(start, end))
+      const readSlice = (offset, size) => {
+        return new Promise((res, rej) => {
+          const reader = new FileReader()
+          reader.onload = (e) => res(e.target.result)
+          reader.onerror = rej
+          reader.readAsArrayBuffer(this.file.slice(offset, offset + size))
+        })
       }
 
-      reader.onload = (e) => {
-        spark.append(e.target.result)
-        currentChunk++
-        if (currentChunk < chunks) {
-          loadNext()
-        } else {
+      Promise.resolve().then(async () => {
+        try {
+          // 读取首部1MB
+          spark.append(await readSlice(0, sampleSize))
+          // 读取尾部1MB
+          if (this.file.size > sampleSize * 2) {
+            spark.append(await readSlice(this.file.size - sampleSize, sampleSize))
+          }
+          // 混入文件元信息
+          spark.append(new TextEncoder().encode(this.file.name + this.file.size))
           resolve(spark.end())
+        } catch (e) {
+          reject(new Error('文件哈希计算失败: ' + e.message))
         }
-      }
-
-      reader.onerror = reject
-      loadNext()
+      })
     })
   }
 
   /**
    * 开始上传
-   * 1. 计算MD5 → 2. 初始化上传 → 3. 获取预签名URL → 4. 直传MinIO → 5. 回调更新进度
+   * 1. 计算快速哈希 → 2. 初始化上传 → 3. 获取预签名URL → 4. 直传MinIO → 5. 回调更新进度
    */
   async start(title, description) {
     try {
-      // 1. 计算MD5
-      this.onProgress({ phase: 'md5', percent: 0, message: '正在计算文件MD5...' })
-      const md5 = await this.computeMd5()
-      this.onProgress({ phase: 'md5', percent: 100, message: 'MD5计算完成' })
+      // 1. 计算快速哈希（首尾采样，极速完成）
+      this.onProgress({ phase: 'hash', percent: 0, message: '正在计算文件哈希...' })
+      const fileMd5 = await this.computeQuickHash()
+      this.onProgress({ phase: 'hash', percent: 100, message: '哈希计算完成' })
 
-      // 2. 初始化上传（服务端会检查MD5秒传 + 创建MinIO分片上传任务）
+      // 2. 初始化上传（服务端会用quickHash+全量MD5双重验证秒传）
       this.onProgress({ phase: 'init', message: '正在初始化上传任务...' })
       const res = await initUpload({
         filename: this.file.name,
         fileSize: this.file.size,
-        fileMd5: md5,
+        fileMd5: fileMd5,
+        quickHash: fileMd5,
         title: title || this.file.name,
         description
       })

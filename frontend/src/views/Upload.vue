@@ -74,7 +74,7 @@
         />
 
         <div class="progress-detail">
-          <el-tag v-if="progressData.phase === 'md5'" type="info">计算MD5</el-tag>
+          <el-tag v-if="progressData.phase === 'hash'" type="info">计算哈希</el-tag>
           <el-tag v-else-if="progressData.phase === 'init'" type="warning">初始化</el-tag>
           <el-tag v-else-if="progressData.phase === 'upload'" type="primary">
             分片 {{ progressData.uploadedChunks || 0 }}/{{ progressData.totalChunks || 0 }}

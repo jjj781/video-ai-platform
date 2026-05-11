@@ -33,7 +33,7 @@ public class AiController {
 
     @Operation(summary = "AI对话")
     @PostMapping("/chat")
-    @RateLimit(permitsPerMinute = 300, key = "ai-chat")
+    @RateLimit(permitsPerMinute = 60, key = "ai-chat")
     public Result<Map<String, String>> chat(@RequestBody ChatRequest request) {
         String conversationId = request.getConversationId();
         if (conversationId == null || conversationId.isEmpty()) {
@@ -55,7 +55,7 @@ public class AiController {
 
     @Operation(summary = "AI对话（流式SSE输出）")
     @PostMapping("/chat/stream")
-    @RateLimit(permitsPerMinute = 300, key = "ai-chat-stream")
+    @RateLimit(permitsPerMinute = 60, key = "ai-chat-stream")
     public SseEmitter chatStream(@RequestBody ChatRequest request) {
         String conversationId = request.getConversationId();
         if (conversationId == null || conversationId.isEmpty()) {

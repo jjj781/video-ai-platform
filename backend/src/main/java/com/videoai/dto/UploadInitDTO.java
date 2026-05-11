@@ -21,6 +21,9 @@ public class UploadInitDTO {
     @NotBlank(message = "文件MD5不能为空")
     private String fileMd5;
 
+    /** 快速哈希（首尾采样，用于初步去重匹配） */
+    private String quickHash;
+
     /** 视频标题 */
     private String title;
 
