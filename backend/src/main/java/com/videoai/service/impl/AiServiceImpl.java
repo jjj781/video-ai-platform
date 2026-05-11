@@ -44,33 +44,30 @@ public class AiServiceImpl implements AiService {
     private final AiConversationMapper conversationMapper;
     private final TaskExecutor sseExecutor;
 
-    private static final String CONTEXT_PREFIX = "ai:context:";
+    private static final String CONTEXT_PREFIX = "ai:ctx:";
     private static final int MAX_CONTEXT_MESSAGES = 20;
+    private static final int RECENT_MSG_COUNT = 10;    // 保留最近10条原文
+    private static final int SUMMARIZE_TRIGGER = 10;   // >10条触发异步摘要
 
     /**
      * AI智能问答（带Function Calling）
      */
     @Override
     public String chat(String conversationId, Long videoId, String userMessage, Long userId) {
-        // 1. 获取/创建会话上下文
-        List<Map<String, String>> messages = getContext(conversationId);
+        // 1. 获取/创建会话上下文（system prompt 每次从 videoId 重建，summary + 最近消息从 Redis 读取）
+        List<Map<String, String>> messages = getContext(conversationId, videoId);
 
-        // 2. 构建系统提示
-        if (messages.isEmpty()) {
-            messages.add(Map.of("role", "system", "content", buildSystemPrompt(videoId)));
-        }
-
-        // 3. 添加用户消息
+        // 2. 添加用户消息
         messages.add(Map.of("role", "user", "content", userMessage));
 
-        // 4. 调用大模型（含Function Calling）
+        // 3. 调用大模型（含Function Calling）
         LlmResult llmResult = callLlmWithFunctions(messages, videoId);
 
-        // 5. 保存上下文
+        // 4. 保存上下文
         messages.add(Map.of("role", "assistant", "content", llmResult.content()));
-        saveContext(conversationId, messages);
+        saveContext(conversationId, messages, videoId);
 
-        // 6. 持久化对话记录
+        // 5. 持久化对话记录
         AiConversation conversation = new AiConversation();
         conversation.setConversationId(conversationId);
         conversation.setVideoId(videoId);
@@ -100,10 +97,7 @@ public class AiServiceImpl implements AiService {
         final StringBuilder[] fullResponseHolder = new StringBuilder[1];
         sseExecutor.execute(() -> {
             try {
-                List<Map<String, String>> messages = getContext(conversationId);
-                if (messages.isEmpty()) {
-                    messages.add(Map.of("role", "system", "content", buildSystemPrompt(videoId)));
-                }
+                List<Map<String, String>> messages = getContext(conversationId, videoId);
                 messages.add(Map.of("role", "user", "content", userMessage));
 
                 // Step 1: 非流式调用 + Function Calling
@@ -115,7 +109,7 @@ public class AiServiceImpl implements AiService {
 
                 // 保存上下文
                 resolvedMessages.add(Map.of("role", "assistant", "content", fullResponse.toString()));
-                saveContext(conversationId, resolvedMessages);
+                saveContext(conversationId, resolvedMessages, videoId);
 
                 // 持久化
                 AiConversation conversation = new AiConversation();
@@ -511,31 +505,147 @@ public class AiServiceImpl implements AiService {
     }
 
     /**
-     * 从Redis获取会话上下文
+     * 组装完整上下文: system prompt(每次重建) + 摘要(如存在) + 最近消息
      */
-    private List<Map<String, String>> getContext(String conversationId) {
-        String key = CONTEXT_PREFIX + conversationId;
-        String cached = redisTemplate.opsForValue().get(key);
-        if (cached != null) {
-            return (List<Map<String, String>>) (Object)JSONUtil.toList(cached, Map.class);
+    private List<Map<String, String>> getContext(String conversationId, Long videoId) {
+        List<Map<String, String>> messages = new ArrayList<>();
+
+        // 1. system prompt — 每次都从 videoId 重建（确保切视频时上下文不泄漏）
+        messages.add(Map.of("role", "system", "content", buildSystemPrompt(videoId)));
+
+        // 2. 摘要 — 旧消息的压缩版
+        String summary = redisTemplate.opsForValue().get(CONTEXT_PREFIX + conversationId + ":summary");
+        if (summary != null && !summary.isBlank()) {
+            messages.add(Map.of("role", "user",
+                    "content", "【历史对话背景】" + summary + "\n请基于以上背景继续回答用户的问题。"));
         }
-        return new ArrayList<>();
+
+        // 3. 最近消息 — 从 Redis List 读取
+        String msgsKey = CONTEXT_PREFIX + conversationId + ":msgs";
+        List<String> raw = redisTemplate.opsForList().range(msgsKey, 0, -1);
+        if (raw != null) {
+            for (String json : raw) {
+                try {
+                    Map<String, String> msg = JSONUtil.toBean(json, Map.class);
+                    messages.add(msg);
+                } catch (Exception e) {
+                    log.warn("解析会话消息失败: conversationId={}", conversationId, e);
+                }
+            }
+        }
+
+        return messages;
     }
 
     /**
-     * 保存会话上下文到Redis (滑动窗口)
+     * 保存会话上下文到 Redis（List 存储 + 异步摘要触发）
      */
-    private void saveContext(String conversationId, List<Map<String, String>> messages) {
-        // 保留最近的消息（滑动窗口）
-        if (messages.size() > MAX_CONTEXT_MESSAGES) {
-            // 保留system prompt + 最近的消息
-            List<Map<String, String>> trimmed = new ArrayList<>();
-            trimmed.add(messages.get(0)); // system prompt
-            trimmed.addAll(messages.subList(messages.size() - MAX_CONTEXT_MESSAGES + 1, messages.size()));
-            messages = trimmed;
+    private void saveContext(String conversationId, List<Map<String, String>> messages, Long videoId) {
+        // 过滤掉 system prompt，只保存对话消息
+        List<Map<String, String>> conversation = new ArrayList<>();
+        for (Map<String, String> msg : messages) {
+            if (!"system".equals(msg.get("role"))) {
+                conversation.add(msg);
+            }
         }
 
-        String key = CONTEXT_PREFIX + conversationId;
-        redisTemplate.opsForValue().set(key, JSONUtil.toJsonStr(messages), 2, TimeUnit.HOURS);
+        String msgsKey = CONTEXT_PREFIX + conversationId + ":msgs";
+        // 先清旧数据，再写入全部
+        redisTemplate.delete(msgsKey);
+        for (Map<String, String> msg : conversation) {
+            redisTemplate.opsForList().rightPush(msgsKey, JSONUtil.toJsonStr(msg));
+        }
+        // 滑动窗口裁剪
+        redisTemplate.opsForList().trim(msgsKey, -MAX_CONTEXT_MESSAGES, -1);
+        redisTemplate.expire(msgsKey, 24, TimeUnit.HOURS);
+
+        // 异步触发摘要压缩
+        if (conversation.size() > SUMMARIZE_TRIGGER) {
+            String lockKey = CONTEXT_PREFIX + conversationId + ":summary-lock";
+            Boolean acquired = redisTemplate.opsForValue()
+                    .setIfAbsent(lockKey, "1", 30, TimeUnit.SECONDS);
+            if (Boolean.TRUE.equals(acquired)) {
+                sseExecutor.execute(() -> summarizeAsync(conversationId, conversation));
+            }
+        }
+    }
+
+    /**
+     * 异步调用 LLM 将旧消息压缩为简短摘要，存回 Redis
+     */
+    private void summarizeAsync(String conversationId, List<Map<String, String>> conversation) {
+        try {
+            // 取前 half 条作为压缩素材（保留后面 half 条原文）
+            int half = conversation.size() / 2;
+            List<Map<String, String>> oldMessages = conversation.subList(0, half);
+
+            // 读取已有摘要
+            String existingSummary = redisTemplate.opsForValue()
+                    .get(CONTEXT_PREFIX + conversationId + ":summary");
+
+            // 构建 prompt
+            StringBuilder prompt = new StringBuilder();
+            prompt.append("你是一个对话摘要助手。请将以下多轮对话压缩成一段简短的背景描述（100字以内）。\n");
+            prompt.append("只记录关键信息：用户问了什么、AI查了什么信息、得出的结论。\n\n");
+
+            if (existingSummary != null && !existingSummary.isBlank()) {
+                prompt.append("现有摘要：").append(existingSummary).append("\n\n");
+            }
+
+            prompt.append("待压缩的对话：\n");
+            for (Map<String, String> msg : oldMessages) {
+                prompt.append("[").append(msg.get("role")).append("]: ")
+                      .append(msg.get("content")).append("\n");
+            }
+
+            prompt.append("\n请输出合并后的完整摘要（仅摘要内容，不要其他文字）：");
+
+            // 调用 LLM
+            String newSummary = callLlmForSummary(prompt.toString());
+            if (newSummary != null && !newSummary.isBlank()) {
+                String summaryKey = CONTEXT_PREFIX + conversationId + ":summary";
+                redisTemplate.opsForValue().set(summaryKey, newSummary, 24, TimeUnit.HOURS);
+                log.info("对话摘要生成成功: conversationId={}, len={}", conversationId, newSummary.length());
+            }
+
+        } catch (Exception e) {
+            log.warn("对话摘要生成失败: conversationId={}", conversationId, e);
+        } finally {
+            // 释放锁
+            redisTemplate.delete(CONTEXT_PREFIX + conversationId + ":summary-lock");
+        }
+    }
+
+    /**
+     * 调用 LLM 生成摘要（简化调用，无 Function Calling，无重试）
+     */
+    private String callLlmForSummary(String prompt) {
+        JSONArray messages = new JSONArray();
+        messages.add(new JSONObject().set("role", "user").set("content", prompt));
+
+        JSONObject body = new JSONObject();
+        body.set("model", aiConfig.getModel());
+        body.set("messages", messages);
+        body.set("max_tokens", 300);
+        body.set("temperature", 0.3);
+        body.set("stream", false);
+
+        HttpResponse response = HttpRequest.post(aiConfig.getApiUrl())
+                .header(Header.AUTHORIZATION, "Bearer " + aiConfig.getApiKey())
+                .header(Header.CONTENT_TYPE, "application/json")
+                .body(body.toString())
+                .timeout(60000)
+                .execute();
+
+        if (!response.isOk()) {
+            log.warn("摘要LLM调用失败: status={}", response.getStatus());
+            return null;
+        }
+
+        JSONObject json = JSONUtil.parseObj(response.body());
+        JSONArray choices = json.getJSONArray("choices");
+        if (choices == null || choices.isEmpty()) return null;
+
+        return choices.getJSONObject(0).getJSONObject("message").getStr("content");
     }
 }

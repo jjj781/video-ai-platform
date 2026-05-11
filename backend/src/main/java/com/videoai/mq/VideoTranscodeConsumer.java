@@ -17,7 +17,8 @@ import org.springframework.stereotype.Component;
 @RequiredArgsConstructor
 @RocketMQMessageListener(
         topic = "VIDEO_TRANSCODE",
-        consumerGroup = "video-transcode-consumer-group"
+        consumerGroup = "video-transcode-consumer-group",
+        maxReconsumeTimes = 3
 )
 public class VideoTranscodeConsumer implements RocketMQListener<VideoTranscodeMessage> {
 

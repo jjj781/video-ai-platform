@@ -27,6 +27,7 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.messaging.support.MessageBuilder;
 import org.springframework.transaction.event.TransactionPhase;
 import org.springframework.transaction.event.TransactionalEventListener;
 
@@ -285,13 +286,29 @@ public class UploadServiceImpl implements UploadService {
     public void onVideoMerged(VideoMergedEvent event) {
         VideoTranscodeMessage transcodeMsg = VideoTranscodeMessage.of(
                 event.videoId(), event.ossKey(), event.filename(), event.fileSize());
+
+        // 优先 RocketMQ，失败时降级为 @Async
         if (rocketMQTemplate != null) {
-            rocketMQTemplate.convertAndSend("VIDEO_TRANSCODE", transcodeMsg);
-            log.info("已发送RocketMQ转码消息: videoId={}", event.videoId());
-        } else {
-            log.warn("RocketMQ未配置, 降级为@Async异步转码: videoId={}", event.videoId());
-            videoTranscodeService.transcodeAsync(transcodeMsg);
+            try {
+                // 1. 正常转码消息（立即投递）
+                rocketMQTemplate.convertAndSend("VIDEO_TRANSCODE", transcodeMsg);
+                log.info("已发送RocketMQ转码消息: videoId={}", event.videoId());
+
+                // 2. 延迟检查消息（5分钟后投递，兜底检查）
+                rocketMQTemplate.syncSend("VIDEO_TRANSCODE_CHECK",
+                        MessageBuilder.withPayload(transcodeMsg).build(),
+                        3000, // 3秒超时
+                        9);   // delayLevel=9 → 5分钟
+                log.info("已发送延迟检查消息(5min): videoId={}", event.videoId());
+                return;
+            } catch (Exception e) {
+                log.warn("RocketMQ发送失败, 降级为@Async: videoId={}", event.videoId(), e);
+            }
         }
+
+        // 降级路径（RocketMQ不可用 或 发送失败）
+        videoTranscodeService.transcodeAsync(transcodeMsg);
+        log.info("已通过@Async触发转码: videoId={}", event.videoId());
     }
 
     /**

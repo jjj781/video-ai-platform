@@ -66,3 +66,15 @@ CREATE TABLE t_ai_conversation (
     INDEX idx_user_id (user_id),
     INDEX idx_video_id (video_id)
 ) ENGINE=InnoDB COMMENT='AI对话记录表';
+
+-- 转码失败记录表（死信队列消费者写入）
+CREATE TABLE t_transcode_failure (
+    id              BIGINT AUTO_INCREMENT PRIMARY KEY,
+    video_id        BIGINT NOT NULL COMMENT '视频ID',
+    oss_key         VARCHAR(512) COMMENT 'OSS对象键',
+    fail_reason     TEXT COMMENT '失败原因',
+    retry_count     INT DEFAULT 0 COMMENT '已重试次数',
+    created_at      DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    INDEX idx_video_id (video_id),
+    INDEX idx_created_at (created_at)
+) ENGINE=InnoDB COMMENT='转码失败记录表';
